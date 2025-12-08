@@ -1,0 +1,37 @@
+# ide / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+env/
+
+# env files
+.env
+.env.*
+
+# os
+.DS_Store
+Thumbs.db
+
+# claude / ai tooling
+.claude/
+
+# gsd planning internals
+.planning/config.json
+.planning/research/
+.planning/STATE.md
+.planning/codebase/
+.planning/**/PLAN.md
+.planning/**/RESEARCH.md
+.planning/**/VERIFICATION.md
