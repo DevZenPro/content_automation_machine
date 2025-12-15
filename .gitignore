@@ -19,6 +19,7 @@ env/
 # env files
 .env
 .env.*
+!.env.example
 
 # os
 .DS_Store
