@@ -28,7 +28,9 @@ class ServerConfig(BaseSettings):
     dry_run: bool = Field(
         default=False, description="Skip actual API calls, log what would be sent"
     )
-    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    log_level: str = Field(
+        default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)"
+    )
 
     model_config = {"env_prefix": "", "env_file": ".env", "env_file_encoding": "utf-8"}
 

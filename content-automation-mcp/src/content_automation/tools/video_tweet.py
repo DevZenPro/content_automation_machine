@@ -39,4 +39,7 @@ async def create_video_tweet(
 
     prompt_preview = prompt[:50]
     tweet_preview = tweet_text[:50]
-    return f"[STUB] Video tweet would be created. Prompt: '{prompt_preview}', Tweet: '{tweet_preview}'"
+    return (
+        f"[STUB] Video tweet would be created."
+        f" Prompt: '{prompt_preview}', Tweet: '{tweet_preview}'"
+    )
