@@ -32,6 +32,14 @@ class ServerConfig(BaseSettings):
         default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)"
     )
 
+    # Transport settings
+    mcp_transport: str = Field(
+        default="stdio", description="MCP transport: 'stdio' (default) or 'http'"
+    )
+    mcp_http_port: int = Field(
+        default=8000, description="HTTP port when using streamable HTTP transport"
+    )
+
     model_config = {"env_prefix": "", "env_file": ".env", "env_file_encoding": "utf-8"}
 
 

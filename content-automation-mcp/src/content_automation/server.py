@@ -1,4 +1,12 @@
-"""FastMCP server with stdio transport for content automation."""
+"""FastMCP server for content automation.
+
+Supports stdio (default) and streamable HTTP transports.
+
+Launch methods:
+  stdio:  uv run python -m content_automation.server
+  http:   MCP_TRANSPORT=http MCP_HTTP_PORT=8000 uv run python -m content_automation.server
+  cli:    fastmcp run content_automation.server:mcp --transport http --port 8000
+"""
 
 import logging
 import sys
@@ -37,4 +45,7 @@ import content_automation.tools.tweet  # noqa: E402, F401
 import content_automation.tools.video_tweet  # noqa: E402, F401
 
 if __name__ == "__main__":
-    mcp.run()
+    if settings.mcp_transport == "http":
+        mcp.run(transport="streamable-http", port=settings.mcp_http_port)
+    else:
+        mcp.run()
