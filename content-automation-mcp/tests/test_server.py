@@ -46,7 +46,8 @@ def test_config_valid_env_vars(monkeypatch):
     assert cfg.blotato_api_key == "key-xyz"
     assert cfg.blotato_account_id == "acct-123"
     # Defaults
-    assert cfg.default_video_model == "wan-2.1"
+    assert cfg.default_video_resolution == "720p"
+    assert cfg.default_video_frames == 81
     assert cfg.dry_run is False
 
 

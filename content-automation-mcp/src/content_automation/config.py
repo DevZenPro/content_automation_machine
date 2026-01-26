@@ -18,12 +18,18 @@ class ServerConfig(BaseSettings):
     blotato_api_key: str = Field(description="Blotato API key for tweet posting")
     blotato_account_id: str = Field(description="Target Twitter account ID in Blotato")
 
-    # Optional with defaults
-    default_video_model: str = Field(
-        default="wan-2.1", description="Default Replicate video model"
+    # Video generation defaults
+    default_video_resolution: str = Field(
+        default="720p", description="Default video resolution (480p or 720p)"
     )
-    default_video_duration: int = Field(
-        default=5, description="Default video duration in seconds"
+    default_video_frames: int = Field(
+        default=81, description="Default number of frames (81-100)"
+    )
+    default_video_fps: int = Field(
+        default=24, description="Default frames per second (5-24)"
+    )
+    video_generation_timeout: float = Field(
+        default=300.0, description="Max seconds to wait for video generation"
     )
     dry_run: bool = Field(
         default=False, description="Skip actual API calls, log what would be sent"
