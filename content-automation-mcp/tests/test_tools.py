@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, patch
 
 from content_automation.services.blotato import BlotatoAPIError
+from content_automation.services.replicate import ReplicateAPIError
 
 # -- create_tweet tests -------------------------------------------------------
 
@@ -141,21 +142,30 @@ async def test_create_tweet_polling_timeout_returns_pending(
 # -- create_video_tweet tests -------------------------------------------------
 
 
-async def test_create_video_tweet_stub(mcp_client):
-    """Calling create_video_tweet with valid args returns a STUB response."""
-    result = await mcp_client.call_tool(
-        "create_video_tweet",
-        {"prompt": "A sunset over the ocean", "tweet_text": "Beautiful sunset"},
-    )
-    text = result.content[0].text
-    assert "STUB" in text
+def _mock_replicate_service(
+    create_return=None, poll_return=None, poll_error=None,
+):
+    """Build a mock ReplicateService with configurable responses."""
+    service = AsyncMock()
+    service.create_prediction.return_value = create_return or {
+        "id": "pred-123",
+        "status": "starting",
+    }
+    if poll_error:
+        service.poll_prediction.side_effect = poll_error
+    else:
+        service.poll_prediction.return_value = poll_return or {
+            "status": "succeeded",
+            "output": "https://replicate.delivery/video.mp4",
+        }
+    return service
 
 
 async def test_create_video_tweet_empty_prompt_error(mcp_client):
     """Empty video prompt produces an isError=True result."""
     result = await mcp_client.call_tool(
         "create_video_tweet",
-        {"prompt": "", "tweet_text": "Some text"},
+        {"prompt": "", "tweet_text": "Some text", "image_url": "https://img.jpg"},
         raise_on_error=False,
     )
     assert result.is_error is True
@@ -165,7 +175,210 @@ async def test_create_video_tweet_empty_tweet_text_error(mcp_client):
     """Empty tweet_text in create_video_tweet produces an isError=True result."""
     result = await mcp_client.call_tool(
         "create_video_tweet",
-        {"prompt": "A valid prompt", "tweet_text": ""},
+        {"prompt": "A valid prompt", "tweet_text": "", "image_url": "https://img.jpg"},
         raise_on_error=False,
     )
     assert result.is_error is True
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_full_pipeline(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """Full pipeline: create prediction -> poll -> post tweet."""
+    mock_replicate = _mock_replicate_service()
+    mock_get_replicate.return_value = mock_replicate
+
+    mock_blotato = _mock_blotato_service(
+        publish_return={"postSubmissionId": "sub-456"},
+        poll_return={
+            "status": "published",
+            "publicUrl": "https://twitter.com/status/789",
+        },
+    )
+    mock_get_blotato.return_value = mock_blotato
+
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset over the ocean",
+            "tweet_text": "Beautiful sunset",
+            "image_url": "https://example.com/photo.jpg",
+        },
+    )
+    data = json.loads(result.content[0].text)
+
+    assert data["prediction_id"] == "pred-123"
+    assert data["video_url"] == "https://replicate.delivery/video.mp4"
+    assert data["postSubmissionId"] == "sub-456"
+    assert data["publicUrl"] == "https://twitter.com/status/789"
+
+    mock_blotato.publish_post.assert_called_once_with(
+        text="Beautiful sunset",
+        media_urls=["https://replicate.delivery/video.mp4"],
+    )
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_timeout_error(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """Replicate timeout surfaces as ToolError with 'timed out' message."""
+    mock_replicate = _mock_replicate_service(
+        poll_error=TimeoutError("Video generation timed out after 300s")
+    )
+    mock_get_replicate.return_value = mock_replicate
+    mock_get_blotato.return_value = _mock_blotato_service()
+
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "timed out" in result.content[0].text.lower()
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_generation_failure(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """Replicate generation failure surfaces as ToolError."""
+    mock_replicate = _mock_replicate_service(
+        poll_error=RuntimeError("Video generation failed: OOM. Prediction ID: pred-123")
+    )
+    mock_get_replicate.return_value = mock_replicate
+    mock_get_blotato.return_value = _mock_blotato_service()
+
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "oom" in result.content[0].text.lower()
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_blotato_error(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """Blotato error after successful video gen surfaces as ToolError with video_url."""
+    mock_replicate = _mock_replicate_service()
+    mock_get_replicate.return_value = mock_replicate
+
+    mock_blotato = AsyncMock()
+    mock_blotato.publish_post.side_effect = BlotatoAPIError(
+        "Client error 401: Unauthorized", status_code=401
+    )
+    mock_get_blotato.return_value = mock_blotato
+
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "401" in result.content[0].text
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_uses_config_defaults(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """Without optional params, create_prediction uses config defaults."""
+    mock_replicate = _mock_replicate_service()
+    mock_get_replicate.return_value = mock_replicate
+    mock_get_blotato.return_value = _mock_blotato_service(
+        publish_return={"postSubmissionId": "sub-456"},
+    )
+
+    await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+    )
+
+    mock_replicate.create_prediction.assert_called_once()
+    call_kwargs = mock_replicate.create_prediction.call_args
+    # Config defaults: 81 frames, 720p, 24 fps
+    assert call_kwargs.kwargs.get("num_frames", call_kwargs[1].get("num_frames", None)) == 81 or \
+        (len(call_kwargs.args) > 2 and call_kwargs.args[2] == 81)
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_output_list_handling(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """When Replicate output is a list, extract first URL."""
+    mock_replicate = _mock_replicate_service(
+        poll_return={
+            "status": "succeeded",
+            "output": ["https://replicate.delivery/video.mp4"],
+        }
+    )
+    mock_get_replicate.return_value = mock_replicate
+    mock_get_blotato.return_value = _mock_blotato_service(
+        publish_return={"postSubmissionId": "sub-456"},
+        poll_return={
+            "status": "published",
+            "publicUrl": "https://twitter.com/status/789",
+        },
+    )
+
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+    )
+    data = json.loads(result.content[0].text)
+    assert data["video_url"] == "https://replicate.delivery/video.mp4"
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_progress_reports(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """Pipeline completes without error when progress reporting is active."""
+    mock_replicate = _mock_replicate_service()
+    mock_get_replicate.return_value = mock_replicate
+    mock_get_blotato.return_value = _mock_blotato_service(
+        publish_return={"postSubmissionId": "sub-456"},
+    )
+
+    # Just verify pipeline completes without error -- progress reporting
+    # is implicit via ctx.report_progress calls within the tool
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+    )
+    assert result.is_error is not True
