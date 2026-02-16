@@ -38,6 +38,23 @@ class ServerConfig(BaseSettings):
         default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)"
     )
 
+    # Resilience settings
+    replicate_daily_budget: int = Field(
+        default=50, description="Max Replicate generations per day"
+    )
+    circuit_breaker_threshold: int = Field(
+        default=5, description="Consecutive failures before circuit opens"
+    )
+    circuit_breaker_recovery_seconds: float = Field(
+        default=60.0, description="Seconds before circuit breaker resets to half-open"
+    )
+    blotato_rpm_limit: int = Field(
+        default=30, description="Max Blotato requests per minute"
+    )
+    twitter_daily_post_limit: int = Field(
+        default=100, description="Max Twitter posts per day"
+    )
+
     # Transport settings
     mcp_transport: str = Field(
         default="stdio", description="MCP transport: 'stdio' (default) or 'http'"

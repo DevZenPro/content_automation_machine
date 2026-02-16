@@ -19,3 +19,14 @@ def test_old_video_fields_removed():
 
     assert not hasattr(settings, "default_video_model")
     assert not hasattr(settings, "default_video_duration")
+
+
+def test_resilience_config_defaults():
+    """Resilience fields have correct defaults."""
+    settings = get_settings()
+
+    assert settings.replicate_daily_budget == 50
+    assert settings.circuit_breaker_threshold == 5
+    assert settings.circuit_breaker_recovery_seconds == 60.0
+    assert settings.blotato_rpm_limit == 30
+    assert settings.twitter_daily_post_limit == 100
