@@ -8,6 +8,7 @@ import httpx
 import structlog
 
 from content_automation.config import get_settings
+from content_automation.resilience import CircuitBreaker, CostBudget
 
 logger = structlog.get_logger()
 
@@ -27,8 +28,15 @@ class ReplicateService:
     BASE_URL = "https://api.replicate.com/v1"
     MODEL_ENDPOINT = "/models/wan-video/wan-2.2-i2v-fast/predictions"
 
-    def __init__(self, api_token: str):
+    def __init__(
+        self,
+        api_token: str,
+        circuit_breaker: CircuitBreaker | None = None,
+        cost_budget: CostBudget | None = None,
+    ):
         self._api_token = api_token
+        self._circuit_breaker = circuit_breaker
+        self._cost_budget = cost_budget
         self._client = httpx.AsyncClient(
             base_url=self.BASE_URL,
             headers={
@@ -56,6 +64,12 @@ class ReplicateService:
         frames_per_second: int = 24,
     ) -> dict:
         """Create an async video prediction. Returns prediction object with id and urls."""
+        # Pre-flight resilience checks
+        if self._circuit_breaker:
+            self._circuit_breaker.check()
+        if self._cost_budget:
+            self._cost_budget.check()
+
         body = {
             "input": {
                 "image": self._normalize_image(image),
@@ -80,22 +94,50 @@ class ReplicateService:
             headers={"Cancel-After": "5m"},
         )
 
+        if response.status_code >= 500:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure()
+            raise ReplicateAPIError(
+                f"Replicate API error {response.status_code}: {response.text}",
+                status_code=response.status_code,
+            )
+
         if response.status_code >= 400:
             raise ReplicateAPIError(
                 f"Replicate API error {response.status_code}: {response.text}",
                 status_code=response.status_code,
             )
 
+        # Success -- record on both guards
+        if self._circuit_breaker:
+            self._circuit_breaker.record_success()
+        if self._cost_budget:
+            self._cost_budget.record_usage()
+
         return response.json()
 
     async def get_prediction(self, prediction_id: str) -> dict:
         """Get current prediction status."""
+        if self._circuit_breaker:
+            self._circuit_breaker.check()
+
         response = await self._client.get(f"/predictions/{prediction_id}")
+
+        if response.status_code >= 500:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure()
+            raise ReplicateAPIError(
+                f"Failed to get prediction {prediction_id}: {response.text}",
+                status_code=response.status_code,
+            )
         if response.status_code >= 400:
             raise ReplicateAPIError(
                 f"Failed to get prediction {prediction_id}: {response.text}",
                 status_code=response.status_code,
             )
+
+        if self._circuit_breaker:
+            self._circuit_breaker.record_success()
         return response.json()
 
     async def cancel_prediction(self, prediction_id: str) -> None:
@@ -158,5 +200,15 @@ def get_replicate_service() -> ReplicateService:
     global _service_instance
     if _service_instance is None:
         settings = get_settings()
-        _service_instance = ReplicateService(api_token=settings.replicate_api_token)
+        cb = CircuitBreaker(
+            "replicate",
+            settings.circuit_breaker_threshold,
+            settings.circuit_breaker_recovery_seconds,
+        )
+        budget = CostBudget(daily_limit=settings.replicate_daily_budget)
+        _service_instance = ReplicateService(
+            api_token=settings.replicate_api_token,
+            circuit_breaker=cb,
+            cost_budget=budget,
+        )
     return _service_instance

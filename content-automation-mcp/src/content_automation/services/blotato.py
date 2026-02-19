@@ -10,6 +10,7 @@ import httpx
 import structlog
 
 from content_automation.config import get_settings
+from content_automation.resilience import CircuitBreaker, RateLimiter
 
 logger = structlog.get_logger()
 
@@ -28,9 +29,17 @@ class BlotatoService:
 
     BASE_URL = "https://backend.blotato.com/v2"
 
-    def __init__(self, api_key: str, account_id: str):
+    def __init__(
+        self,
+        api_key: str,
+        account_id: str,
+        circuit_breaker: CircuitBreaker | None = None,
+        rate_limiter: RateLimiter | None = None,
+    ):
         self._api_key = api_key
         self._account_id = account_id
+        self._circuit_breaker = circuit_breaker
+        self._rate_limiter = rate_limiter
         self._client = httpx.AsyncClient(
             base_url=self.BASE_URL,
             headers={
@@ -63,12 +72,20 @@ class BlotatoService:
         if additional_posts:
             body["post"]["content"]["additionalPosts"] = additional_posts
 
+        # Check rate limiter before making the API call
+        if self._rate_limiter:
+            self._rate_limiter.check()
+
         return await self._post_with_retry("/posts", body)
 
     async def _post_with_retry(
         self, path: str, body: dict, max_attempts: int = 3
     ) -> dict:
         """POST with retry on 5xx/timeout/connection errors. Raises immediately on 4xx."""
+        # Check circuit breaker before attempting any requests
+        if self._circuit_breaker:
+            self._circuit_breaker.check()
+
         last_error: Exception | None = None
 
         for attempt in range(max_attempts):
@@ -87,6 +104,11 @@ class BlotatoService:
                         status_code=response.status_code,
                     )
                 else:
+                    # Record success on both circuit breaker and rate limiter
+                    if self._circuit_breaker:
+                        self._circuit_breaker.record_success()
+                    if self._rate_limiter:
+                        self._rate_limiter.record()
                     return response.json()
 
             except BlotatoAPIError:
@@ -101,6 +123,9 @@ class BlotatoService:
                 logger.warning("blotato_retry", attempt=attempt + 1, delay=round(delay, 2))
                 await asyncio.sleep(delay)
 
+        # All retries exhausted -- record failure
+        if self._circuit_breaker:
+            self._circuit_breaker.record_failure()
         raise last_error  # type: ignore[misc]
 
     async def poll_post_status(
@@ -143,8 +168,19 @@ def get_blotato_service() -> BlotatoService:
     global _service_instance
     if _service_instance is None:
         settings = get_settings()
+        cb = CircuitBreaker(
+            "blotato",
+            settings.circuit_breaker_threshold,
+            settings.circuit_breaker_recovery_seconds,
+        )
+        rl = RateLimiter(
+            rpm_limit=settings.blotato_rpm_limit,
+            daily_limit=settings.twitter_daily_post_limit,
+        )
         _service_instance = BlotatoService(
             api_key=settings.blotato_api_key,
             account_id=settings.blotato_account_id,
+            circuit_breaker=cb,
+            rate_limiter=rl,
         )
     return _service_instance
