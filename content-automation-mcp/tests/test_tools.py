@@ -1,8 +1,14 @@
 """Tool-specific tests: service integration, validation errors, media and threading."""
 
 import json
+import os
 from unittest.mock import AsyncMock, patch
 
+from content_automation.resilience import (
+    BudgetExceededError,
+    CircuitOpenError,
+    RateLimitError,
+)
 from content_automation.services.blotato import BlotatoAPIError
 from content_automation.services.replicate import ReplicateAPIError
 
@@ -382,3 +388,159 @@ async def test_create_video_tweet_progress_reports(
         },
     )
     assert result.is_error is not True
+
+
+# -- dry-run mode tests -------------------------------------------------------
+
+
+@patch("content_automation.tools.tweet.get_blotato_service")
+async def test_create_tweet_dry_run_skips_service(mock_get_service, mcp_client):
+    """In dry-run mode, create_tweet returns mock JSON without calling BlotatoService."""
+    mock_service = _mock_blotato_service()
+    mock_get_service.return_value = mock_service
+
+    os.environ["DRY_RUN"] = "true"
+    try:
+        result = await mcp_client.call_tool("create_tweet", {"text": "Hello dry run"})
+    finally:
+        os.environ.pop("DRY_RUN", None)
+
+    data = json.loads(result.content[0].text)
+    assert data["dry_run"] is True
+    assert "Hello dry run" in data["would_post"]["text"]
+    mock_service.publish_post.assert_not_called()
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_dry_run_skips_services(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """In dry-run mode, create_video_tweet returns mock JSON with fake prediction_id."""
+    mock_replicate = _mock_replicate_service()
+    mock_get_replicate.return_value = mock_replicate
+    mock_blotato = _mock_blotato_service()
+    mock_get_blotato.return_value = mock_blotato
+
+    os.environ["DRY_RUN"] = "true"
+    try:
+        result = await mcp_client.call_tool(
+            "create_video_tweet",
+            {
+                "prompt": "Test prompt",
+                "tweet_text": "Test tweet",
+                "image_url": "https://example.com/photo.jpg",
+            },
+        )
+    finally:
+        os.environ.pop("DRY_RUN", None)
+
+    data = json.loads(result.content[0].text)
+    assert data["dry_run"] is True
+    mock_replicate.create_prediction.assert_not_called()
+    mock_blotato.publish_post.assert_not_called()
+
+
+# -- input validation tests ---------------------------------------------------
+
+
+async def test_create_video_tweet_invalid_base64_error(mcp_client):
+    """Invalid base64 image input raises ToolError."""
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "not!!!valid===base64",
+        },
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "invalid image input" in result.content[0].text.lower()
+
+
+async def test_create_video_tweet_non_http_url_error(mcp_client):
+    """Non-HTTP image_url raises ToolError."""
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "ftp://example.com/photo.jpg",
+        },
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "invalid image input" in result.content[0].text.lower()
+
+
+async def test_create_tweet_non_http_media_url_error(mcp_client):
+    """media_urls containing non-HTTP URL raises ToolError."""
+    result = await mcp_client.call_tool(
+        "create_tweet",
+        {"text": "Hello", "media_urls": ["ftp://bad.com/file.mp4"]},
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "http" in result.content[0].text.lower()
+
+
+# -- resilience error propagation tests ----------------------------------------
+
+
+@patch("content_automation.tools.tweet.get_blotato_service")
+async def test_create_tweet_circuit_open_error(mock_get_service, mcp_client):
+    """CircuitOpenError from service surfaces as ToolError with 'circuit breaker' message."""
+    mock_service = AsyncMock()
+    mock_service.publish_post.side_effect = CircuitOpenError(
+        "Circuit open for blotato (55s until probe)"
+    )
+    mock_get_service.return_value = mock_service
+
+    result = await mcp_client.call_tool(
+        "create_tweet", {"text": "Should fail"}, raise_on_error=False
+    )
+    assert result.is_error is True
+    assert "circuit" in result.content[0].text.lower()
+
+
+@patch("content_automation.tools.video_tweet.get_blotato_service")
+@patch("content_automation.tools.video_tweet.get_replicate_service")
+async def test_create_video_tweet_budget_exceeded_error(
+    mock_get_replicate, mock_get_blotato, mcp_client
+):
+    """BudgetExceededError from service surfaces as ToolError with 'budget' message."""
+    mock_replicate = AsyncMock()
+    mock_replicate.create_prediction.side_effect = BudgetExceededError(
+        "Daily budget exhausted (50/50)"
+    )
+    mock_get_replicate.return_value = mock_replicate
+    mock_get_blotato.return_value = _mock_blotato_service()
+
+    result = await mcp_client.call_tool(
+        "create_video_tweet",
+        {
+            "prompt": "A sunset",
+            "tweet_text": "Beautiful",
+            "image_url": "https://example.com/photo.jpg",
+        },
+        raise_on_error=False,
+    )
+    assert result.is_error is True
+    assert "budget" in result.content[0].text.lower()
+
+
+@patch("content_automation.tools.tweet.get_blotato_service")
+async def test_create_tweet_rate_limit_error(mock_get_service, mcp_client):
+    """RateLimitError from service surfaces as ToolError with 'rate limit' message."""
+    mock_service = AsyncMock()
+    mock_service.publish_post.side_effect = RateLimitError(
+        "per-minute rate limit exceeded (30/30)"
+    )
+    mock_get_service.return_value = mock_service
+
+    result = await mcp_client.call_tool(
+        "create_tweet", {"text": "Should fail"}, raise_on_error=False
+    )
+    assert result.is_error is True
+    assert "rate limit" in result.content[0].text.lower()
