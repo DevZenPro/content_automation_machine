@@ -7,6 +7,8 @@ import structlog
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from content_automation.config import get_settings
+from content_automation.resilience import ResilienceError
 from content_automation.server import mcp
 from content_automation.services.blotato import BlotatoAPIError, get_blotato_service
 
@@ -35,6 +37,32 @@ async def create_tweet(
         raise ToolError(
             f"Tweet text exceeds 280 characters (got {len(text)}). Shorten the text and retry."
         )
+
+    # Validate media URLs
+    if media_urls:
+        for url in media_urls:
+            if not url.startswith(("http://", "https://")):
+                raise ToolError(
+                    f"Invalid media URL: {url!r}. Media URLs must use http:// or https://."
+                )
+
+    # Dry-run guard -- return mock response without calling service
+    settings = get_settings()
+    if settings.dry_run:
+        logger.info(
+            "dry_run_skip",
+            tool="create_tweet",
+            text_preview=text[:50],
+            media_count=len(media_urls) if media_urls else 0,
+        )
+        return json.dumps({
+            "dry_run": True,
+            "would_post": {
+                "text": text,
+                "media_urls": media_urls or [],
+                "thread_posts": thread_posts or [],
+            },
+        })
 
     # Build additional posts for threading
     additional = None
@@ -76,5 +104,7 @@ async def create_tweet(
                 }
             )
 
+    except ResilienceError as e:
+        raise ToolError(str(e))
     except BlotatoAPIError as e:
         raise ToolError(str(e))
