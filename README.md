@@ -19,7 +19,7 @@ An MCP server that automates video tweet creation by orchestrating Replicate (AI
 ### Install
 
 ```bash
-cd content-automation-mcp
+# clone and install
 uv sync --group dev
 ```
 
@@ -57,7 +57,7 @@ Add to your Claude Desktop MCP config:
   "mcpServers": {
     "content-automation": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/content-automation-mcp", "python", "-m", "content_automation.server"],
+      "args": ["run", "--directory", "/path/to/content_automation_machine", "python", "-m", "content_automation.server"],
       "env": {
         "REPLICATE_API_TOKEN": "r8_...",
         "BLOTATO_API_KEY": "blot_...",
